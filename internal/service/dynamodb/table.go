@@ -186,6 +186,7 @@ func resourceTable() *schema.Resource {
 							Elem:     &schema.Schema{Type: schema.TypeString},
 						},
 						"on_demand_throughput": onDemandThroughputSchema(),
+						"warm_throughput":      warmThroughputSchema(),
 						"projection_type": {
 							Type:             schema.TypeString,
 							Required:         true,
@@ -252,6 +253,7 @@ func resourceTable() *schema.Resource {
 				ForceNew: true,
 			},
 			"on_demand_throughput": onDemandThroughputSchema(),
+			"warm_throughput":      warmThroughputSchema(),
 			"point_in_time_recovery": {
 				Type:     schema.TypeList,
 				Optional: true,
@@ -529,6 +531,34 @@ func onDemandThroughputSchema() *schema.Schema {
 	}
 }
 
+func warmThroughputSchema() *schema.Schema {
+	return &schema.Schema{
+		Type:     schema.TypeList,
+		Optional: true,
+		MaxItems: 1,
+		Elem: &schema.Resource{
+			Schema: map[string]*schema.Schema{
+				"read_units_per_second": {
+					Type:     schema.TypeInt,
+					Optional: true,
+					Computed: true,
+					DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
+						return old == "0" && new == "-1"
+					},
+				},
+				"write_units_per_second": {
+					Type:     schema.TypeInt,
+					Optional: true,
+					Computed: true,
+					DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
+						return old == "0" && new == "-1"
+					},
+				},
+			},
+		},
+	}
+}
+
 func resourceTableCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	var diags diag.Diagnostics
 	conn := meta.(*conns.AWSClient).DynamoDBClient(ctx)
@@ -747,6 +777,10 @@ func resourceTableCreate(ctx context.Context, d *schema.ResourceData, meta inter
 			input.OnDemandThroughput = expandOnDemandThroughput(v.([]interface{})[0].(map[string]interface{}))
 		}
 
+		if v, ok := d.GetOk("warm_throughput"); ok && len(v.([]interface{})) > 0 && v.([]interface{})[0] != nil {
+			input.WarmThroughput = expandWarmThroughput(v.([]interface{})[0].(map[string]interface{}))
+		}
+
 		if v, ok := d.GetOk("stream_enabled"); ok {
 			input.StreamSpecification = &awstypes.StreamSpecification{
 				StreamEnabled:  aws.Bool(v.(bool)),
@@ -883,6 +917,10 @@ func resourceTableRead(ctx context.Context, d *schema.ResourceData, meta interfa
 	}
 
 	if err := d.Set("on_demand_throughput", flattenOnDemandThroughput(table.OnDemandThroughput)); err != nil {
+		return create.AppendDiagSettingError(diags, names.DynamoDB, resNameTable, d.Id(), "on_demand_throughput", err)
+	}
+
+	if err := d.Set("warm_throughput", flattenOnDemandThroughput(table.OnDemandThroughput)); err != nil {
 		return create.AppendDiagSettingError(diags, names.DynamoDB, resNameTable, d.Id(), "on_demand_throughput", err)
 	}
 
@@ -1683,6 +1721,10 @@ func updateDiffGSI(oldGsi, newGsi []interface{}, billingMode awstypes.BillingMod
 				c.OnDemandThroughput = expandOnDemandThroughput(v[0].(map[string]any))
 			}
 
+			if v, ok := m["warm_throughput"].([]any); ok && len(v) > 0 && v[0] != nil {
+				c.WarmThroughput = expandWarmThroughput(v[0].(map[string]any))
+			}
+
 			ops = append(ops, awstypes.GlobalSecondaryIndexUpdate{
 				Create: &c,
 			})
@@ -1711,9 +1753,26 @@ func updateDiffGSI(oldGsi, newGsi []interface{}, billingMode awstypes.BillingMod
 			if v, ok := newMap["on_demand_throughput"].([]any); ok && len(v) > 0 && v[0] != nil {
 				newOnDemandThroughput = expandOnDemandThroughput(v[0].(map[string]any))
 			}
+
 			var onDemandThroughputChanged bool
 			if !reflect.DeepEqual(oldOnDemandThroughput, newOnDemandThroughput) {
 				onDemandThroughputChanged = true
+			}
+
+			oldWarmThroughput := &awstypes.WarmThroughput{}
+			newWarmThroughput := &awstypes.WarmThroughput{}
+
+			if v, ok := oldMap["warm_throughput"].([]any); ok && len(v) > 0 && v[0] != nil {
+				oldWarmThroughput = expandWarmThroughput(v[0].(map[string]any))
+			}
+
+			if v, ok := newMap["warm_throughput"].([]any); ok && len(v) > 0 && v[0] != nil {
+				newWarmThroughput = expandWarmThroughput(v[0].(map[string]any))
+			}
+
+			var warmThroughputChanged bool
+			if !reflect.DeepEqual(oldWarmThroughput, newWarmThroughput) {
+				warmThroughputChanged = true
 			}
 
 			// pluck non_key_attributes from oldAttributes and newAttributes as reflect.DeepEquals will compare
@@ -1759,6 +1818,14 @@ func updateDiffGSI(oldGsi, newGsi []interface{}, billingMode awstypes.BillingMod
 					Update: &awstypes.UpdateGlobalSecondaryIndexAction{
 						IndexName:          aws.String(idxName),
 						OnDemandThroughput: newOnDemandThroughput,
+					},
+				}
+				ops = append(ops, update)
+			} else if warmThroughputChanged && !otherAttributesChanged && billingMode == awstypes.BillingModePayPerRequest {
+				update := awstypes.GlobalSecondaryIndexUpdate{
+					Update: &awstypes.UpdateGlobalSecondaryIndexAction{
+						IndexName:      aws.String(idxName),
+						WarmThroughput: newWarmThroughput,
 					},
 				}
 				ops = append(ops, update)
@@ -2328,6 +2395,10 @@ func expandGlobalSecondaryIndex(data map[string]interface{}, billingMode awstype
 		output.OnDemandThroughput = expandOnDemandThroughput(v[0].(map[string]any))
 	}
 
+	if v, ok := data["warm_throughput"].([]any); ok && len(v) > 0 && v[0] != nil {
+		output.WarmThroughput = expandWarmThroughput(v[0].(map[string]any))
+	}
+
 	return &output
 }
 
@@ -2450,6 +2521,24 @@ func expandOnDemandThroughput(tfMap map[string]interface{}) *awstypes.OnDemandTh
 
 	if v, ok := tfMap["max_write_request_units"].(int); ok && v != 0 {
 		apiObject.MaxWriteRequestUnits = aws.Int64(int64(v))
+	}
+
+	return apiObject
+}
+
+func expandWarmThroughput(tfMap map[string]interface{}) *awstypes.WarmThroughput {
+	if tfMap == nil {
+		return nil
+	}
+
+	apiObject := &awstypes.WarmThroughput{}
+
+	if v, ok := tfMap["read_units_per_second"].(int); ok && v != 0 {
+		apiObject.ReadUnitsPerSecond = aws.Int64(int64(v))
+	}
+
+	if v, ok := tfMap["write_units_per_second"].(int); ok && v != 0 {
+		apiObject.WriteUnitsPerSecond = aws.Int64(int64(v))
 	}
 
 	return apiObject

@@ -898,6 +898,70 @@ func TestAccDynamoDBTable_BillingMode_payPerRequestBasic(t *testing.T) {
 	})
 }
 
+func TestAccDynamoDBTable_WarmThroughput(t *testing.T) {
+	ctx := acctest.Context(t)
+	if testing.Short() {
+		t.Skip("skipping long-running test in short mode")
+	}
+
+	var conf awstypes.TableDescription
+	resourceName := "aws_dynamodb_table.test"
+	rName := sdkacctest.RandomWithPrefix(acctest.ResourcePrefix)
+
+	resource.ParallelTest(t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.DynamoDBServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckTableDestroy(ctx),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccTableConfig_warmThroughput(rName, 12001, 4001),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckInitialTableExists(ctx, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "billing_mode", string(awstypes.BillingModePayPerRequest)),
+					resource.TestCheckResourceAttr(resourceName, "warm_throughput.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "warm_throughput.0.read_units_per_second", "12001"),
+					resource.TestCheckResourceAttr(resourceName, "warm_throughput.0.write_units_per_second", "4001"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccDynamoDBTable_WarmThroughputGSI(t *testing.T) {
+	ctx := acctest.Context(t)
+	if testing.Short() {
+		t.Skip("skipping long-running test in short mode")
+	}
+
+	var conf awstypes.TableDescription
+	resourceName := "aws_dynamodb_table.test"
+	rName := sdkacctest.RandomWithPrefix(acctest.ResourcePrefix)
+
+	resource.ParallelTest(t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.DynamoDBServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckTableDestroy(ctx),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccTableConfig_gsiWarmThroughput(rName, 12001, 4001, 12002, 4002),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckInitialTableExists(ctx, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "billing_mode", string(awstypes.BillingModePayPerRequest)),
+					resource.TestCheckResourceAttr(resourceName, "warm_throughput.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "warm_throughput.0.read_units_per_second", "12001"),
+					resource.TestCheckResourceAttr(resourceName, "warm_throughput.0.write_units_per_second", "4001"),
+					resource.TestCheckTypeSetElemNestedAttrs(resourceName, "global_secondary_index.*", map[string]string{
+						"warm_throughput.0.read_units_per_second":  "12002",
+						"warm_throughput.0.write_units_per_second": "4002",
+					}),
+				),
+			},
+		},
+	})
+}
+
 func TestAccDynamoDBTable_onDemandThroughput(t *testing.T) {
 	ctx := acctest.Context(t)
 	var conf awstypes.TableDescription
@@ -3212,6 +3276,67 @@ resource "aws_dynamodb_table" "test" {
   }
 }
 `, rName)
+}
+
+func testAccTableConfig_warmThroughput(rName string, read, write int) string {
+	return fmt.Sprintf(`
+resource "aws_dynamodb_table" "test" {
+  name         = %[1]q
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "TestTableHashKey"
+
+  attribute {
+    name = "TestTableHashKey"
+    type = "S"
+  }
+
+  warm_throughput {
+    read_units_per_second = %[2]d
+    write_units_per_second = %[3]d
+  }
+}
+`, rName, read, write)
+}
+
+func testAccTableConfig_gsiWarmThroughput(rName string, read, write, gsiRead, gsiWrite int) string {
+	return fmt.Sprintf(`
+resource "aws_dynamodb_table" "test" {
+  name         = %[1]q
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "TestTableHashKey"
+
+  warm_throughput {
+    read_units_per_second  = %[2]d
+    write_units_per_second = %[3]d
+  }
+
+  global_secondary_index {
+    name            = "att1-index"
+    hash_key        = "att1"
+    projection_type = "ALL"
+
+    on_demand_throughput {
+      max_read_request_units  = 10
+      max_write_request_units = 10
+    }
+
+	warm_throughput {
+		read_units_per_second  = %[4]d
+		write_units_per_second = %[5]d
+	}
+  }
+
+  attribute {
+    name = "TestTableHashKey"
+    type = "S"
+  }
+
+  attribute {
+    name = "att1"
+    type = "S"
+  }
+}
+`, rName, read, write, gsiRead, gsiWrite)
 }
 
 func testAccTableConfig_billingPayPerRequestIgnoreChanges(rName string) string {
